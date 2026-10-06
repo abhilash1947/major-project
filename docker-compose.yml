@@ -1,0 +1,113 @@
+# Docker Compose for Railway DSS
+# Runs all components: Python backend, Java backend, React frontend, PostgreSQL, Redis
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:13-alpine
+    container_name: railway_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: railway_dss
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    networks:
+      - railway_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: railway_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - railway_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Python Backend (ML & Simulation)
+  python_backend:
+    build:
+      context: ./backend-python
+      dockerfile: Dockerfile
+    container_name: railway_python_backend
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: redis://redis:6379
+      PYTHONPATH: /app
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend-python:/app
+    networks:
+      - railway_network
+    command: python src/api/main.py
+
+  # Java Backend (DSS & API Gateway)
+  java_backend:
+    build:
+      context: ./backend-java
+      dockerfile: Dockerfile
+    container_name: railway_java_backend
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/railway_dss
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - railway_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # React Frontend
+  react_frontend:
+    build:
+      context: ./frontend-react
+      dockerfile: Dockerfile
+    container_name: railway_react_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_JAVA_API: http://java_backend:8080
+      REACT_APP_PYTHON_API: http://python_backend:8000
+    depends_on:
+      - java_backend
+      - python_backend
+    networks:
+      - railway_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  railway_network:
+    driver: bridge
